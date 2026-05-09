@@ -159,7 +159,7 @@ Dython is a **teaching tool**, not a production language. It crystallises the co
 
 MIT License
 
-Copyright (c) 2025
+Copyright (c) 2025 0xA672
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
