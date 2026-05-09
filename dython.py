@@ -56,7 +56,7 @@ class Bop:
     def __init__(s, op, left, right): s.op = op; s.left = left; s.right = right
 
 class Prs:
-    def __init__(s, toks): s.tk = toks; s.p = 0
+    def __init__(s, toks, src=""): s.tk = toks; s.p = 0; s.src = src.split("\n")
 
     def cur(s): return s.tk[s.p]
 
@@ -68,10 +68,24 @@ class Prs:
 
     def eat(s, t=None, v=None):
         c = s.cur()
-        if t and c.t != t: raise SyntaxError(f"L{c.l}: exp {t}, got {c}")
-        if v and c.v != v: raise SyntaxError(f"L{c.l}: exp {v!r}, got {c}")
+        if t and c.t != t:
+            exp = f"token type '{t}'"
+            if v: exp = f"'{v}'"
+            s._err(f"expected {exp}, got {c}")
+        if v and c.v != v:
+            s._err(f"expected '{v}', got '{c.v}'")
         s.p += 1
         return c
+
+    def _err(s, msg):
+        c = s.cur()
+        line = c.l
+        col = 1
+        hint = ""
+        if 1 <= line <= len(s.src):
+            src_line = s.src[line-1]
+            hint = f"\n  {src_line}\n  {' ' * (max(0, col-1))}~"
+        raise SyntaxError(f"L{line}: {msg}{hint}")
 
     def parse(s):
         a = {}
@@ -178,7 +192,8 @@ class Prs:
         elif s.mt("STR"): t = s.eat("STR"); return Lit(t.v[1:-1], 'str')
         elif s.mt("I"): t = s.eat("I"); return Var(t.v)
         elif s.mt("LP"): s.eat("LP"); e = s.expr(); s.eat("RP"); return e
-        else: raise SyntaxError(f"L{s.cur().l}: unexpected token {s.cur()}")
+        else:
+            s._err(f"unexpected token {s.cur()}")
 
     def _chk_no_var(s, expr):
         def has_var(e):
@@ -186,7 +201,9 @@ class Prs:
             if isinstance(e, Bop): return has_var(e.left) or has_var(e.right)
             return False
         if has_var(expr):
-            raise SyntaxError("Actor state var init cannot reference other variables")
+            c = s.cur()
+            line = c.l
+            s._err("actor state var init cannot reference variables")
 
 class Obj:
     _id = 0
@@ -217,6 +234,7 @@ class GC:
             s.out.add(o.id); return o
         elif o.c == "ref":
             raise RuntimeError(f"Data race! ref obj {o.id} '{o.v}' across actors")
+        raise RuntimeError(f"unknown capability {o.c} in send")
 
     def recv_proto(s, o): s.h[o.id] = o
 
@@ -268,19 +286,22 @@ class AI:
             oid = s._eval(st.e, rt)
             o = rt.ghm.get(oid)
             if o: log.append(f"  PRINT: {o.v}")
-            else: log.append(f"  PRINT: Object GC'd")
+            else: log.append("  PRINT: Object GC'd")
         elif isinstance(st, Send): s._send(st, rt, log)
 
     def _send(s, st, rt, log):
         toid = s.vars.get(st.t)
-        if toid is None: log.append(f"  Send: target '{st.t}' not found"); return
+        if toid is None:
+            known = ", ".join(s.vars.keys())
+            raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': target '{st.t}' not found. Known vars: {known}")
         to = rt.ghm.get(toid)
-        if not isinstance(to, AR): log.append(f"  Send: '{st.t}' not an Actor"); return
+        if not isinstance(to, AR):
+            raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': '{st.t}' is not an actor (type: {type(to).__name__})")
         ta = rt.actors[to.aid]; binds = []
         for ae in st.a:
             oid = s._eval(ae, rt)
             o = rt.ghm.get(oid)
-            if o is None: log.append(f"  Send: arg GC'd"); return
+            if o is None: raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': arg '{ae}' was GC'd before send")
             binds.append(o)
         for o in binds:
             try:
@@ -289,8 +310,9 @@ class AI:
                 if not isinstance(o, AR) and o.c == "iso":
                     for vn, vid in list(s.vars.items()):
                         if vid == o.id: del s.vars[vn]; log.append(f"     Var '{vn}' revoked (iso)")
-            except RuntimeError as e: log.append(f"  {e}"); return
-        tb = ta.d.bs.get(st.bn); named = []
+            except RuntimeError as e: raise
+        tb = ta.d.bs.get(st.bn)
+        named = []
         for i, o in enumerate(binds):
             if tb and i < len(tb.ps): named.append((tb.ps[i][0], o))
             else: named.append((f"arg{i}", o))
@@ -302,7 +324,9 @@ class AI:
             o = s.gc.alloc(expr.v, "val"); rt.ghm[o.id] = o; return o.id
         elif isinstance(expr, Var):
             oid = s.vars.get(expr.name)
-            if oid is None: raise RuntimeError(f"Var '{expr.name}' not found")
+            if oid is None:
+                known = ", ".join(s.vars.keys())
+                raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': variable '{expr.name}' not found. Known vars: {known}")
             return oid
         elif isinstance(expr, Bop):
             left_id = s._eval(expr.left, rt)
@@ -322,12 +346,12 @@ class AI:
                 elif op == "GT":   res = lv > rv
                 elif op == "LE":   res = lv <= rv
                 elif op == "GE":   res = lv >= rv
-                else: raise RuntimeError(f"op {op} unsupported")
+                else: raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': unsupported operator {op}")
             else:
-                raise RuntimeError(f"type mismatch in {op}: {type(lv).__name__} vs {type(rv).__name__}")
+                raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': type mismatch in {op}: {type(lv).__name__} ({lv}) vs {type(rv).__name__} ({rv})")
             o = s.gc.alloc(res, "val"); rt.ghm[o.id] = o; return o.id
         else:
-            raise RuntimeError("bad expr")
+            raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': bad expression node {type(expr).__name__}")
 
 class DR:
     def __init__(s, ads):
@@ -350,7 +374,11 @@ class DR:
         while st < mx:
             anyexec = 0
             for aid in sorted(s.actors.keys()):
-                if s.actors[aid].proc(s, s.log): anyexec = 1
+                try:
+                    if s.actors[aid].proc(s, s.log): anyexec = 1
+                except RuntimeError as e:
+                    s.log.append(f"\n  RUNTIME ERROR: {e}")
+                    raise
             st += 1
             if not anyexec:
                 s.log.append(f"\nAll messages processed. Halted at step {st}."); break
@@ -360,7 +388,9 @@ class DR:
         for l in s.log: print(l)
 
 def run(code, mx=50):
-    toks = lx(code); ast = Prs(toks).parse(); rt = DR(ast)
+    toks = lx(code)
+    ast = Prs(toks, code).parse()
+    rt = DR(ast)
     en = None
     for n in ("App", "Main"):
         if n in ast: en = n; break
