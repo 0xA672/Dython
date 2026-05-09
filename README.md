@@ -14,6 +14,7 @@ It demonstrates **Orca‑style garbage collection** combined with **reference ca
   - `iso` – isolated, mutable only by the owning actor, transferred on send (ownership moves).
   - `val` – deeply immutable, can be shared freely, but the original sender keeps a reference (outgoing refs tracked).
   - `ref` – mutable local reference; **cannot** be sent to another actor (would cause data races).
+- **Expressions & arithmetic** – integer and string literals, plus basic arithmetic (`+`, `-`, `*`, `/`) and comparisons (`==`, `!=`, `<`, `>`, `<=`, `>=`). Variables can be used in expressions where allowed.
 - **Orca GC protocol** – each actor has its own local heap and garbage collector. When an object is sent, the sender applies a `send_proto()` protocol; the receiver applies `recv_proto()`. The protocol enforces safety and tracks outgoing references.
 - **Per‑actor mark‑and‑sweep GC** – runs after every behaviour execution, cleaning up objects no longer reachable from local variables.
 - **Instantiation & dynamic actor creation** – `new ActorName` creates fresh actors at runtime.
@@ -34,17 +35,31 @@ actor Greeter
 ### Variables and Capabilities
 ```dython
 var greeting: val = "Hello, Dython!"
-var mutable: ref = "I can change"
+var answer: val = 40 + 2
 var payload: iso = "I'll be moved"
 ```
-- Variables must be declared inside actors or behaviours using `var name : capability = "string value"`.
-- Only string literals are supported for object values in the current implementation.
+- Actor state variables (declared directly inside an `actor` block) must be initialised with literal‑only expressions (no variable references).
+- Behaviour‑local `var` statements can use any expression, including references to other local variables.
+- Capabilities: `val` for immutable data, `ref` for local mutable, `iso` for transferable ownership.
+
+### Expressions
+```dython
+var x: val = 10 + 20 * 3
+var y: val = x + 5
+print y
+```
+- Integers and strings are fully supported.
+- Arithmetic: `+`, `-`, `*`, `/` (integer division).
+- Comparisons: `==`, `!=`, `<`, `>`, `<=`, `>=`.
+- Parentheses can be used for grouping.
 
 ### Message Passing
 ```dython
 consumer ! receive(payload)
+calc ! compute(10 + 5, "result")
 ```
 - `target ! behaviour_name(arg1, arg2, ...)` sends an asynchronous message.
+- Arguments can be arbitrary expressions, evaluated before sending.
 - The sender applies the Orca *send protocol* to each argument, which enforces the capability rules.
 
 ### Actor Creation
@@ -56,8 +71,9 @@ new worker = Worker
 ### The `print` Statement
 ```dython
 print variable_name
+print 1 + 2
 ```
-- Prints the value of a local variable (or indicates if it’s been GC’d or is inaccessible).
+- Prints the value of any expression. If the object has been GC'd or is otherwise inaccessible, a warning is shown.
 
 ## Orca GC in a Nutshell
 
@@ -83,15 +99,15 @@ The whole runtime is provided in `dython.py`. You can call the `run()` function 
 from dython import run
 
 source = """
-actor Hello
-    behav world()
-        print msg
+actor Calc
+    behav result()
+        var x: val = 10 + 20 * 3
+        print x
 
 actor App
     behav main()
-        var msg: val = "Hello from Dython!"
-        new h = Hello
-        h ! world(msg)
+        new c = Calc
+        c ! result()
 """
 run(source)
 ```
@@ -100,7 +116,7 @@ If no `App` or `Main` actor is defined, the runtime instantiates all top‑level
 
 ### Included Tests
 
-Execute the file directly to see five demonstrations:
+Execute the file directly to see six demonstrations:
 ```bash
 python dython.py
 ```
@@ -110,6 +126,7 @@ They illustrate:
 3. `ref` cross‑actor protection (data race prevention)
 4. Full actor creation and communication
 5. Local GC reclaiming unreachable objects
+6. Integer arithmetic and expression evaluation
 
 You’ll see detailed logs of message sends, GC sweeps, and actor state.
 
@@ -117,25 +134,47 @@ You’ll see detailed logs of message sends, GC sweeps, and actor state.
 
 | Module / Class      | Purpose |
 |---------------------|---------|
-| `lx()`             | Lexer – tokenises source code using regex. |
-| `Prs`              | Recursive‑descent parser – builds an AST of actors, behaviours, statements. |
-| `AD`, `BD`, `Asgn`, `NewA`, `Send`, `Prt` | AST node classes. |
+| `lx()`             | Lexer – tokenises source code using regex, including operators and numbers. |
+| `Prs`              | Recursive‑descent parser – builds an AST of actors, behaviours, statements, and full expressions. |
+| `AD`, `BD`, `Asgn`, `NewA`, `Send`, `Prt`, `Lit`, `Var`, `Bop` | AST node classes covering actor definitions, behaviours, variable assignment, actor creation, message send, print, literal values, variable references, and binary operations. |
 | `Obj`, `AR`        | Runtime representations of objects and actor references. |
 | `GC`               | Per‑actor garbage collector implementing the Orca protocol and mark‑sweep. |
-| `AI`               | Actor instance – runs behaviours, stores local variables and heap. |
+| `AI`               | Actor instance – runs behaviours, evaluates expressions, stores local variables and heap. |
 | `DR`               | Dython Runtime – instantiates actors, manages the global object map, and runs the event loop. |
 | `run()`            | Convenience function: lex, parse, instantiate, run, and print the log. |
 
 ## Limitations
 
-- Only string literals are supported as values.
-- No arithmetic, conditionals, loops, or user‑defined capabilities.
+- No control flow (no `if`, `while`, loops).
+- Only integer and string types; no user‑defined classes or arrays.
+- Expression evaluation always creates new `val` objects on the fly for intermediate results (no in‑place mutation).
 - Actors are single‑threaded and run cooperatively (one behaviour at a time, in a fixed order).
-- The parser is permissive but fragile; error messages are basic.
 - `ref` parameters in behaviours are not deeply checked for safety – the model trusts that actors do not expose them externally.
 
 Dython is a **teaching tool**, not a production language. It crystallises the core ideas of the Orca GC into a runnable, inspectable system.
 
 ---
 
-*Dython was created to make the principles of Pony’s garbage collector approachable and fun. Fork it, hack it, and learn from it!*
+## License
+
+MIT License
+
+Copyright (c) 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
