@@ -20,6 +20,7 @@ _LEX_TS = [
     ("RBRACE", r"\}"),
     ("NL",  r"\n"),
     ("WS",  r"[ \t]+"),
+    ("ERR", r"."),
 ]
 _LEX_RE = re.compile("|".join(f"(?P<{a}>{b})" for a, b in _LEX_TS))
 
@@ -27,6 +28,8 @@ def lx(c):
     toks, ln = [], 1
     for m in _LEX_RE.finditer(c):
         k, v = m.lastgroup, m.group()
+        if k == "ERR":
+            raise SyntaxError(f"L{ln}: illegal character '{v}'")
         if k == "NL": ln += 1; continue
         if k in ("WS", "C"): continue
         toks.append(Tk(k, v, ln))
@@ -258,49 +261,47 @@ class Obj:
         Obj._id += 1; s.id = Obj._id; s.v = v; s.c = c
 
 class AR:
+    _id = 0
     def __init__(s, aid, an):
-        Obj._id += 1; s.id = Obj._id; s.aid = aid; s.an = an
+        AR._id += 1; s.id = AR._id; s.aid = aid; s.an = an
         s.c = "ref"; s.v = f"<Actor:{an}#{aid}>"
 
 class GC:
-    def __init__(s, an, aid):
-        s.an, s.aid, s.h, s.out, s.ep = an, aid, {}, set(), 0
+    def __init__(s, an, aid, rt):
+        s.an, s.aid, s.h, s.rt = an, aid, {}, rt
 
     def alloc(s, v, c):
-        o = Obj(v, c); s.h[o.id] = o; return o
+        o = Obj(v, c); s.h[o.id] = o; s.rt._inc_ref(o.id); return o
 
     def alloc_ar(s, aid, an):
-        r = AR(aid, an); s.h[r.id] = r; return r
+        r = AR(aid, an); s.h[r.id] = r; s.rt._inc_ref(r.id); return r
 
     def send_proto(s, o):
         if isinstance(o, AR): return o
         if o.c == "iso":
-            if o.id in s.h: del s.h[o.id]
+            if o.id in s.h: del s.h[o.id]; s.rt._dec_ref(o.id)
             return o
         elif o.c == "val":
-            s.out.add(o.id); return o
+            return o
         elif o.c == "ref":
-            raise RuntimeError(f"Data race! ref obj {o.id} '{o.v}' across actors")
+            raise RuntimeError(f"Data race! ref obj {o.id} '{o.v}' cannot be sent")
         raise RuntimeError(f"unknown capability {o.c} in send")
 
-    def recv_proto(s, o): s.h[o.id] = o
+    def recv_proto(s, o):
+        s.h[o.id] = o; s.rt._inc_ref(o.id)
 
-    def ms(s, roots, ghm=None):
-        s.ep += 1; reach = set()
-        for rid in roots:
-            if rid in s.h: reach.add(rid)
-        reach.update(s.out)
-        to_del = [oid for oid in s.h if oid not in reach]
+    def ms(s, roots):
+        reach = set(roots)
         swept = []
-        for oid in to_del:
-            o = s.h[oid]; swept.append((oid, o.v, o.c)); del s.h[oid]
-            if ghm and oid in ghm: del ghm[oid]
+        for oid in list(s.h.keys()):
+            if oid not in reach:
+                swept.append((oid, s.h[oid].v, s.h[oid].c))
+                del s.h[oid]; s.rt._dec_ref(oid)
         return swept
 
 class AI:
     def __init__(s, d, aid, rt):
-        s.d, s.id, s.rt, s.vars, s.gc, s.mb = d, aid, rt, {}, GC(d.n, aid), deque()
-        s._obj_to_var = {}
+        s.d, s.id, s.rt, s.vars, s.gc, s.mb = d, aid, rt, {}, GC(d.n, aid, rt), deque()
 
     def proc(s, log):
         if not s.mb: return 0
@@ -308,17 +309,21 @@ class AI:
         log.append(f"\n{'─'*55}")
         log.append(f"Actor[{s.id}] ({s.d.n}) > {bn}")
         bh = s.d.bs[bn]
-        for pn, o in binds:
-            s.gc.recv_proto(o); s.vars[pn] = o.id; s._obj_to_var[o.id] = pn
+        for i, (pn, o) in enumerate(binds):
+            if bh and i < len(bh.ps):
+                param_cap = bh.ps[i][1]
+                if o.c != param_cap:
+                    s._err(f"behavior '{bn}' param '{pn}' expects {param_cap}, got {o.c}", 0)
+            s.gc.recv_proto(o); s.vars[pn] = o.id
             log.append(f"  Param '{pn}' ({o.c}) = \"{o.v}\" [obj {o.id}]")
         for st in bh.b:
             s._exec(st, log)
         log.append(f"  Orca GC sweep for Actor[{s.id}] ({s.d.n})...")
         roots = list(s.vars.values())
-        swept = s.gc.ms(roots, s.rt.ghm)
+        swept = s.gc.ms(roots)
         for oid, v, c in swept:
             log.append(f"     Swept {c} obj {oid}: '{v}'")
-        log.append(f"  Heap: {len(s.gc.h)} objs | Outgoing refs: {len(s.gc.out)}")
+        log.append(f"  Heap: {len(s.gc.h)} objs")
         return 1
 
     def _err(s, msg, line):
@@ -341,17 +346,24 @@ class AI:
     def _exec(s, st, log):
         if isinstance(st, Asgn):
             oid = s._eval(st.val)
-            o = s.rt.ghm[oid]; o.c = st.c
+            o = s.rt.ghm.get(oid)
+            if o is None: s._err(f"value object {oid} no longer exists", st.line)
+            o.c = st.c
             old_oid = s.vars.get(st.vn)
-            if old_oid is not None: s._obj_to_var.pop(old_oid, None)
-            s.vars[st.vn] = oid; s._obj_to_var[oid] = st.vn
+            if old_oid is not None:
+                del s.vars[st.vn]
+            if o.c == "iso":
+                s._check_iso_alias(oid, st.vn, st.line)
+            s.vars[st.vn] = oid
             log.append(f"  var {st.vn}: {o.c} = \"{o.v}\" [obj {oid}]")
         elif isinstance(st, NewA):
             nid = s.rt.inst(st.at, quiet=1)
             r = s.gc.alloc_ar(nid, st.at)
+            s.rt.ghm[r.id] = r; s.rt.arm[r.id] = nid
             old_oid = s.vars.get(st.vn)
-            if old_oid is not None: s._obj_to_var.pop(old_oid, None)
-            s.vars[st.vn] = r.id; s.rt.ghm[r.id] = r; s.rt.arm[r.id] = nid; s._obj_to_var[r.id] = st.vn
+            if old_oid is not None:
+                del s.vars[st.vn]
+            s.vars[st.vn] = r.id
             log.append(f"  new {st.vn} = {st.at} (actor_id={nid}, ref_id={r.id})")
         elif isinstance(st, Prt):
             oid = s._eval(st.e)
@@ -372,36 +384,50 @@ class AI:
                 if not s._truthy(oid): break
                 for sub in st.body: s._exec(sub, log)
 
+    def _check_iso_alias(s, oid, new_vn, line):
+        for vn, vid in s.vars.items():
+            if vid == oid:
+                s._err(f"iso object {oid} already held by variable '{vn}', cannot create alias '{new_vn}'", line)
+
     def _send(s, st, log):
         toid = s.vars.get(st.t)
         if toid is None:
             known = ", ".join(s.vars.keys())
             s._err(f"target '{st.t}' not found. Known vars: {known}", st.line)
         to = s.rt.ghm.get(toid)
+        if to is None:
+            s._err(f"target actor object {toid} no longer exists", st.line)
         if not isinstance(to, AR):
             s._err(f"'{st.t}' is not an actor (type: {type(to).__name__})", st.line)
-        ta = s.rt.actors[to.aid]; binds = []
+        ta = s.rt.actors.get(to.aid)
+        if ta is None:
+            s._err(f"actor with id {to.aid} not found", st.line)
+        arg_oids = []
         for ae in st.a:
             oid = s._eval(ae)
             o = s.rt.ghm.get(oid)
-            if o is None: s._err(f"arg '{ae}' was GC'd before send", st.line)
-            binds.append(o)
-        for o in binds:
-            try:
-                s.gc.send_proto(o)
-                log.append(f"  GC: sending {o.c} obj {o.id} ('{str(o.v)[:25]}')")
-                if not isinstance(o, AR) and o.c == "iso":
-                    vn = s._obj_to_var.pop(o.id, None)
-                    if vn is not None:
-                        del s.vars[vn]
-                        log.append(f"     Var '{vn}' revoked (iso)")
-            except RuntimeError as e:
-                s._err(str(e), st.line)
+            if o is None: s._err(f"argument object {oid} no longer exists", st.line)
+            arg_oids.append((oid, o))
+        for oid, o in arg_oids:
+            if o.c == "ref":
+                s._err(f"cannot send ref object {oid} '{o.v}'", st.line)
+            if o.c == "iso":
+                s._check_iso_alias(oid, None, st.line)
+        for oid, o in arg_oids:
+            s.gc.send_proto(o)
+            log.append(f"  GC: sending {o.c} obj {oid} ('{str(o.v)[:25]}')")
+            if o.c == "iso":
+                to_remove = [vn for vn, vid in s.vars.items() if vid == oid]
+                for vn in to_remove:
+                    del s.vars[vn]
+                    log.append(f"     Var '{vn}' revoked (iso)")
         tb = ta.d.bs.get(st.bn)
         named = []
-        for i, o in enumerate(binds):
-            if tb and i < len(tb.ps): named.append((tb.ps[i][0], o))
-            else: named.append((f"arg{i}", o))
+        for i, (oid, o) in enumerate(arg_oids):
+            if tb and i < len(tb.ps):
+                named.append((tb.ps[i][0], o))
+            else:
+                named.append((f"arg{i}", o))
         ta.mb.append((st.bn, named))
         log.append(f"  '{st.bn}' -> Actor[{to.aid}] ({to.an})")
 
@@ -413,11 +439,15 @@ class AI:
             if oid is None:
                 known = ", ".join(s.vars.keys())
                 s._err(f"variable '{expr.name}' not found. Known vars: {known}", expr.line)
+            if s.rt.ghm.get(oid) is None:
+                s._err(f"object {oid} associated with '{expr.name}' no longer exists", expr.line)
             return oid
         elif isinstance(expr, Bop):
             left_id = s._eval(expr.left)
             right_id = s._eval(expr.right)
-            lo = s.rt.ghm[left_id]; ro = s.rt.ghm[right_id]
+            lo = s.rt.ghm.get(left_id); ro = s.rt.ghm.get(right_id)
+            if lo is None or ro is None:
+                s._err(f"operand no longer exists", expr.line)
             lv, rv = lo.v, ro.v; op = expr.op
             if isinstance(lv, str) and isinstance(rv, str) and op == "ADD":
                 res = lv + rv
@@ -442,8 +472,20 @@ class AI:
 class DR:
     def __init__(s, ads, src=None):
         s.ad, s.actors, s.ghm, s.arm, s.nid, s.log = ads, {}, {}, {}, 1, []
+        s.refcnt = {}
         s.src = src.split("\n") if src else []
         s._aid_order = []
+
+    def _inc_ref(s, oid):
+        s.refcnt[oid] = s.refcnt.get(oid, 0) + 1
+
+    def _dec_ref(s, oid):
+        if oid in s.refcnt:
+            s.refcnt[oid] -= 1
+            if s.refcnt[oid] <= 0:
+                del s.refcnt[oid]
+                if oid in s.ghm:
+                    del s.ghm[oid]
 
     def inst(s, an, quiet=0):
         d = s.ad[an]; ai = AI(d, s.nid, s); s.actors[s.nid] = ai; aid = s.nid; s.nid += 1
@@ -452,7 +494,9 @@ class DR:
         else: s.log.append(f"  (new) Actor: {an} (id={aid})")
         for vn, c, val in d.sv:
             oid = ai._eval(val)
-            o = s.ghm[oid]; o.c = c; ai.vars[vn] = oid; ai._obj_to_var[oid] = vn
+            o = s.ghm.get(oid)
+            if o is None: raise RuntimeError(f"State init object {oid} missing")
+            o.c = c; ai.vars[vn] = oid
         return aid
 
     def run(s, mx=500):
