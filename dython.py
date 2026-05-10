@@ -35,28 +35,28 @@ class BD:
     def __init__(s, n, ps, b): s.n, s.ps, s.b = n, ps, b
 
 class Asgn:
-    def __init__(s, vn, c, val): s.vn, s.c, s.val = vn, c, val
+    def __init__(s, vn, c, val, line=0): s.vn, s.c, s.val, s.line = vn, c, val, line
 
 class NewA:
-    def __init__(s, vn, at): s.vn, s.at = vn, at
+    def __init__(s, vn, at, line=0): s.vn, s.at, s.line = vn, at, line
 
 class Send:
-    def __init__(s, t, bn, a): s.t, s.bn, s.a = t, bn, a
+    def __init__(s, t, bn, a, line=0): s.t, s.bn, s.a, s.line = t, bn, a, line
 
 class Prt:
-    def __init__(s, e): s.e = e
+    def __init__(s, e, line=0): s.e, s.line = e, line
 
 class Lit:
-    def __init__(s, v, typ): s.v = v; s.typ = typ
+    def __init__(s, v, typ, line=0): s.v, s.typ, s.line = v, typ, line
 
 class Var:
-    def __init__(s, name): s.name = name
+    def __init__(s, name, line=0): s.name, s.line = name, line
 
 class Bop:
-    def __init__(s, op, left, right): s.op = op; s.left = left; s.right = right
+    def __init__(s, op, left, right, line=0): s.op, s.left, s.right, s.line = op, left, right, line
 
 class Prs:
-    def __init__(s, toks, src=""): s.tk = toks; s.p = 0; s.src = src.split("\n")
+    def __init__(s, toks, src=""): s.tk, s.p, s.src = toks, 0, src.split("\n") if src else []
 
     def cur(s): return s.tk[s.p]
 
@@ -80,11 +80,11 @@ class Prs:
     def _err(s, msg):
         c = s.cur()
         line = c.l
-        col = 1
         hint = ""
         if 1 <= line <= len(s.src):
-            src_line = s.src[line-1]
-            hint = f"\n  {src_line}\n  {' ' * (max(0, col-1))}~"
+            sl = s.src[line-1]
+            indent = len(sl) - len(sl.lstrip())
+            hint = "\n  " + sl + "\n  " + " " * indent + "^"
         raise SyntaxError(f"L{line}: {msg}{hint}")
 
     def parse(s):
@@ -141,28 +141,32 @@ class Prs:
         return ps
 
     def _stmt_var(s):
+        line = s.cur().l
         s.eat("K", "var"); vn = s.eat("I").v
         s.eat("CLN"); c = s.eat("K").v
         s.eat("EQ"); val = s.expr()
-        return Asgn(vn, c, val)
+        return Asgn(vn, c, val, line)
 
     def _stmt_new(s):
+        line = s.cur().l
         s.eat("K", "new"); vn = s.eat("I").v
         s.eat("EQ"); at = s.eat("I").v
-        return NewA(vn, at)
+        return NewA(vn, at, line)
 
     def _stmt_print(s):
+        line = s.cur().l
         s.eat("K", "print"); e = s.expr()
-        return Prt(e)
+        return Prt(e, line)
 
     def _stmt_send(s):
+        line = s.cur().l
         t = s.eat("I").v; s.eat("BNG"); bn = s.eat("I").v
         s.eat("LP"); args = []
         while not s.mt("RP"):
             args.append(s.expr())
             if s.mt("CMA"): s.eat("CMA")
         s.eat("RP")
-        return Send(t, bn, args)
+        return Send(t, bn, args, line)
 
     def expr(s): return s._comp()
 
@@ -170,27 +174,27 @@ class Prs:
         left = s._sum()
         while s.mt("EQEQ") or s.mt("NEQ") or s.mt("LT") or s.mt("GT") or s.mt("LE") or s.mt("GE"):
             op = s.cur().t; s.eat(op); right = s._sum()
-            left = Bop(op, left, right)
+            left = Bop(op, left, right, s.cur().l)
         return left
 
     def _sum(s):
         left = s._term()
         while s.mt("ADD") or s.mt("SUB"):
             op = s.cur().t; s.eat(op); right = s._term()
-            left = Bop(op, left, right)
+            left = Bop(op, left, right, s.cur().l)
         return left
 
     def _term(s):
         left = s._atom()
         while s.mt("MUL") or s.mt("DIV"):
             op = s.cur().t; s.eat(op); right = s._atom()
-            left = Bop(op, left, right)
+            left = Bop(op, left, right, s.cur().l)
         return left
 
     def _atom(s):
-        if s.mt("N"): t = s.eat("N"); return Lit(int(t.v), 'int')
-        elif s.mt("STR"): t = s.eat("STR"); return Lit(t.v[1:-1], 'str')
-        elif s.mt("I"): t = s.eat("I"); return Var(t.v)
+        if s.mt("N"): t = s.eat("N"); return Lit(int(t.v), 'int', t.l)
+        elif s.mt("STR"): t = s.eat("STR"); return Lit(t.v[1:-1], 'str', t.l)
+        elif s.mt("I"): t = s.eat("I"); return Var(t.v, t.l)
         elif s.mt("LP"): s.eat("LP"); e = s.expr(); s.eat("RP"); return e
         else:
             s._err(f"unexpected token {s.cur()}")
@@ -201,8 +205,6 @@ class Prs:
             if isinstance(e, Bop): return has_var(e.left) or has_var(e.right)
             return False
         if has_var(expr):
-            c = s.cur()
-            line = c.l
             s._err("actor state var init cannot reference variables")
 
 class Obj:
@@ -217,7 +219,7 @@ class AR:
 
 class GC:
     def __init__(s, an, aid):
-        s.an = an; s.aid = aid; s.h = {}; s.out = set(); s.ep = 0
+        s.an, s.aid, s.h, s.out, s.ep = an, aid, {}, set(), 0
 
     def alloc(s, v, c):
         o = Obj(v, c); s.h[o.id] = o; return o
@@ -250,10 +252,10 @@ class GC:
         return swept
 
 class AI:
-    def __init__(s, d, aid):
-        s.d = d; s.id = aid; s.vars = {}; s.gc = GC(d.n, aid); s.mb = []
+    def __init__(s, d, aid, rt):
+        s.d, s.id, s.rt, s.vars, s.gc, s.mb = d, aid, rt, {}, GC(d.n, aid), []
 
-    def proc(s, rt, log):
+    def proc(s, log):
         if not s.mb: return 0
         bn, binds = s.mb.pop(0)
         log.append(f"\n{'─'*55}")
@@ -262,7 +264,8 @@ class AI:
         for pn, o in binds:
             s.gc.recv_proto(o); s.vars[pn] = o.id
             log.append(f"  Param '{pn}' ({o.c}) = \"{o.v}\" [obj {o.id}]")
-        for st in bh.b: s._exec(st, rt, log)
+        for st in bh.b:
+            s._exec(st, log)
         log.append(f"  Orca GC sweep for Actor[{s.id}] ({s.d.n})...")
         roots = list(s.vars.values())
         swept = s.gc.ms(roots)
@@ -271,37 +274,45 @@ class AI:
         log.append(f"  Heap: {len(s.gc.h)} objs | Outgoing refs: {len(s.gc.out)}")
         return 1
 
-    def _exec(s, st, rt, log):
+    def _err(s, msg, line):
+        src = s.rt.src
+        hint = ""
+        if src and 1 <= line <= len(src):
+            sl = src[line-1]
+            indent = len(sl) - len(sl.lstrip())
+            hint = "\n  " + sl + "\n  " + " " * indent + "^"
+        raise RuntimeError(f"L{line} Actor[{s.id}] '{s.d.n}': {msg}{hint}")
+
+    def _exec(s, st, log):
         if isinstance(st, Asgn):
-            oid = s._eval(st.val, rt)
-            o = rt.ghm[oid]; o.c = st.c
-            s.vars[st.vn] = oid
+            oid = s._eval(st.val)
+            o = s.rt.ghm[oid]; o.c = st.c; s.vars[st.vn] = oid
             log.append(f"  var {st.vn}: {o.c} = \"{o.v}\" [obj {oid}]")
         elif isinstance(st, NewA):
-            nid = rt.inst(st.at, quiet=1)
+            nid = s.rt.inst(st.at, quiet=1)
             r = s.gc.alloc_ar(nid, st.at)
-            s.vars[st.vn] = r.id; rt.ghm[r.id] = r; rt.arm[r.id] = nid
+            s.vars[st.vn] = r.id; s.rt.ghm[r.id] = r; s.rt.arm[r.id] = nid
             log.append(f"  new {st.vn} = {st.at} (actor_id={nid}, ref_id={r.id})")
         elif isinstance(st, Prt):
-            oid = s._eval(st.e, rt)
-            o = rt.ghm.get(oid)
+            oid = s._eval(st.e)
+            o = s.rt.ghm.get(oid)
             if o: log.append(f"  PRINT: {o.v}")
             else: log.append("  PRINT: Object GC'd")
-        elif isinstance(st, Send): s._send(st, rt, log)
+        elif isinstance(st, Send): s._send(st, log)
 
-    def _send(s, st, rt, log):
+    def _send(s, st, log):
         toid = s.vars.get(st.t)
         if toid is None:
             known = ", ".join(s.vars.keys())
-            raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': target '{st.t}' not found. Known vars: {known}")
-        to = rt.ghm.get(toid)
+            s._err(f"target '{st.t}' not found. Known vars: {known}", st.line)
+        to = s.rt.ghm.get(toid)
         if not isinstance(to, AR):
-            raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': '{st.t}' is not an actor (type: {type(to).__name__})")
-        ta = rt.actors[to.aid]; binds = []
+            s._err(f"'{st.t}' is not an actor (type: {type(to).__name__})", st.line)
+        ta = s.rt.actors[to.aid]; binds = []
         for ae in st.a:
-            oid = s._eval(ae, rt)
-            o = rt.ghm.get(oid)
-            if o is None: raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': arg '{ae}' was GC'd before send")
+            oid = s._eval(ae)
+            o = s.rt.ghm.get(oid)
+            if o is None: s._err(f"arg '{ae}' was GC'd before send", st.line)
             binds.append(o)
         for o in binds:
             try:
@@ -310,7 +321,8 @@ class AI:
                 if not isinstance(o, AR) and o.c == "iso":
                     for vn, vid in list(s.vars.items()):
                         if vid == o.id: del s.vars[vn]; log.append(f"     Var '{vn}' revoked (iso)")
-            except RuntimeError as e: raise
+            except RuntimeError as e:
+                s._err(str(e), st.line)
         tb = ta.d.bs.get(st.bn)
         named = []
         for i, o in enumerate(binds):
@@ -319,50 +331,51 @@ class AI:
         ta.mb.append((st.bn, named))
         log.append(f"  '{st.bn}' -> Actor[{to.aid}] ({to.an})")
 
-    def _eval(s, expr, rt):
+    def _eval(s, expr):
         if isinstance(expr, Lit):
-            o = s.gc.alloc(expr.v, "val"); rt.ghm[o.id] = o; return o.id
+            o = s.gc.alloc(expr.v, "val"); s.rt.ghm[o.id] = o; return o.id
         elif isinstance(expr, Var):
             oid = s.vars.get(expr.name)
             if oid is None:
                 known = ", ".join(s.vars.keys())
-                raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': variable '{expr.name}' not found. Known vars: {known}")
+                s._err(f"variable '{expr.name}' not found. Known vars: {known}", expr.line)
             return oid
         elif isinstance(expr, Bop):
-            left_id = s._eval(expr.left, rt)
-            right_id = s._eval(expr.right, rt)
-            lo = rt.ghm[left_id]; ro = rt.ghm[right_id]
+            left_id = s._eval(expr.left)
+            right_id = s._eval(expr.right)
+            lo = s.rt.ghm[left_id]; ro = s.rt.ghm[right_id]
             lv, rv = lo.v, ro.v; op = expr.op
             if isinstance(lv, str) and isinstance(rv, str) and op == "ADD":
                 res = lv + rv
             elif isinstance(lv, int) and isinstance(rv, int):
-                if   op == "ADD":  res = lv + rv
-                elif op == "SUB":  res = lv - rv
-                elif op == "MUL":  res = lv * rv
-                elif op == "DIV":  res = lv // rv
+                if op == "ADD": res = lv + rv
+                elif op == "SUB": res = lv - rv
+                elif op == "MUL": res = lv * rv
+                elif op == "DIV": res = lv // rv
                 elif op == "EQEQ": res = lv == rv
-                elif op == "NEQ":  res = lv != rv
-                elif op == "LT":   res = lv < rv
-                elif op == "GT":   res = lv > rv
-                elif op == "LE":   res = lv <= rv
-                elif op == "GE":   res = lv >= rv
-                else: raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': unsupported operator {op}")
+                elif op == "NEQ": res = lv != rv
+                elif op == "LT": res = lv < rv
+                elif op == "GT": res = lv > rv
+                elif op == "LE": res = lv <= rv
+                elif op == "GE": res = lv >= rv
+                else: s._err(f"unsupported operator {op}", expr.line)
             else:
-                raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': type mismatch in {op}: {type(lv).__name__} ({lv}) vs {type(rv).__name__} ({rv})")
-            o = s.gc.alloc(res, "val"); rt.ghm[o.id] = o; return o.id
+                s._err(f"type mismatch in {op}: {type(lv).__name__} ({lv}) vs {type(rv).__name__} ({rv})", expr.line)
+            o = s.gc.alloc(res, "val"); s.rt.ghm[o.id] = o; return o.id
         else:
-            raise RuntimeError(f"Actor[{s.id}] '{s.d.n}': bad expression node {type(expr).__name__}")
+            s._err(f"bad expression node {type(expr).__name__}", 0)
 
 class DR:
-    def __init__(s, ads):
-        s.ad = ads; s.actors = {}; s.ghm = {}; s.arm = {}; s.nid = 1; s.log = []
+    def __init__(s, ads, src=None):
+        s.ad, s.actors, s.ghm, s.arm, s.nid, s.log = ads, {}, {}, {}, 1, []
+        s.src = src.split("\n") if src else []
 
     def inst(s, an, quiet=0):
-        d = s.ad[an]; ai = AI(d, s.nid); s.actors[s.nid] = ai; aid = s.nid; s.nid += 1
+        d = s.ad[an]; ai = AI(d, s.nid, s); s.actors[s.nid] = ai; aid = s.nid; s.nid += 1
         if not quiet: s.log.append(f"Instantiated Actor: {an} (id={aid})")
         else: s.log.append(f"  (new) Actor: {an} (id={aid})")
         for vn, c, val in d.sv:
-            oid = ai._eval(val, s)
+            oid = ai._eval(val)
             o = s.ghm[oid]; o.c = c; ai.vars[vn] = oid
         return aid
 
@@ -375,7 +388,7 @@ class DR:
             anyexec = 0
             for aid in sorted(s.actors.keys()):
                 try:
-                    if s.actors[aid].proc(s, s.log): anyexec = 1
+                    if s.actors[aid].proc(s.log): anyexec = 1
                 except RuntimeError as e:
                     s.log.append(f"\n  RUNTIME ERROR: {e}")
                     raise
@@ -390,7 +403,7 @@ class DR:
 def run(code, mx=50):
     toks = lx(code)
     ast = Prs(toks, code).parse()
-    rt = DR(ast)
+    rt = DR(ast, code)
     en = None
     for n in ("App", "Main"):
         if n in ast: en = n; break
