@@ -250,14 +250,12 @@ class Prs:
             s._err("actor state var init cannot reference variables")
 
 class Obj:
-    _id = 0
-    def __init__(s, v, c):
-        Obj._id += 1; s.id = Obj._id; s.v = v; s.c = c
+    def __init__(s, v, c, oid):
+        s.id = oid; s.v = v; s.c = c
 
 class AR:
-    _id = 0
-    def __init__(s, aid, an):
-        AR._id += 1; s.id = AR._id; s.aid = aid; s.an = an
+    def __init__(s, aid, an, oid):
+        s.id = oid; s.aid = aid; s.an = an
         s.c = "ref"; s.v = f"<Actor:{an}#{aid}>"
 
 class GC:
@@ -265,10 +263,16 @@ class GC:
         s.an, s.aid, s.h, s.rt = an, aid, {}, rt
 
     def alloc(s, v, c):
-        o = Obj(v, c); s.h[o.id] = o; s.rt._inc_ref(o.id); return o
+        oid = s.rt._fresh_id()
+        o = Obj(v, c, oid)
+        s.h[o.id] = o; s.rt._inc_ref(o.id)
+        return o
 
     def alloc_ar(s, aid, an):
-        r = AR(aid, an); s.h[r.id] = r; s.rt._inc_ref(r.id); return r
+        oid = s.rt._fresh_id()
+        r = AR(aid, an, oid)
+        s.h[r.id] = r; s.rt._inc_ref(r.id)
+        return r
 
     def send_proto(s, o):
         if isinstance(o, AR): return o
@@ -486,6 +490,12 @@ class DR:
         s.refcnt = {}
         s.src = src.split("\n") if src else []
         s._aid_order = []
+        s._next_id = 1
+
+    def _fresh_id(s):
+        oid = s._next_id
+        s._next_id += 1
+        return oid
 
     def _inc_ref(s, oid):
         s.refcnt[oid] = s.refcnt.get(oid, 0) + 1
