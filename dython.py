@@ -308,8 +308,13 @@ class AI:
         bn, binds = s.mb.popleft()
         log.append(f"\n{'─'*55}")
         log.append(f"Actor[{s.id}] ({s.d.n}) > {bn}")
+
+        if bn not in s.d.bs:
+            s._err(f"behavior '{bn}' not found in actor '{s.d.n}'", 0)
         bh = s.d.bs[bn]
+
         state_vars = {sv[0] for sv in s.d.sv}
+
         for i, (pn, o) in enumerate(binds):
             if bh and i < len(bh.ps):
                 param_cap = bh.ps[i][1]
@@ -317,14 +322,17 @@ class AI:
                     s._err(f"behavior '{bn}' param '{pn}' expects {param_cap}, got {o.c}", 0)
             s.gc.recv_proto(o); s.vars[pn] = o.id
             log.append(f"  Param '{pn}' ({o.c}) = \"{o.v}\" [obj {o.id}]")
+
         for st in bh.b:
             s._exec(st, log)
+
+        # 先裁剪局部变量，保证 GC 根集准确
+        s.vars = {k: v for k, v in s.vars.items() if k in state_vars}
         log.append(f"  Orca GC sweep for Actor[{s.id}] ({s.d.n})...")
         roots = list(s.vars.values())
         swept = s.gc.ms(roots)
         for oid, v, c in swept:
             log.append(f"     Swept {c} obj {oid}: '{v}'")
-        s.vars = {k: v for k, v in s.vars.items() if k in state_vars}
         log.append(f"  Heap: {len(s.gc.h)} objs")
         return 1
 
@@ -341,6 +349,7 @@ class AI:
         o = s.rt.ghm.get(oid)
         if o is None: return False
         val = o.v
+        if isinstance(val, bool): return val
         if isinstance(val, int): return val != 0
         if isinstance(val, str): return val != ""
         return True
@@ -408,17 +417,20 @@ class AI:
         ta = s.rt.actors.get(to.aid)
         if ta is None:
             s._err(f"actor with id {to.aid} not found", st.line)
+
         arg_oids = []
         for ae in st.a:
             oid = s._eval(ae)
             o = s.rt.ghm.get(oid)
             if o is None: s._err(f"argument object {oid} no longer exists", st.line)
             arg_oids.append((oid, o))
+
+        # 验证：ref 禁止发送
         for oid, o in arg_oids:
             if o.c == "ref":
                 s._err(f"cannot send ref object {oid} '{o.v}'", st.line)
-            if o.c == "iso":
-                s._check_iso_alias(oid, "<send>", st.line)
+
+        # 先执行发送协议，对 iso 撤销发送方的持有权
         for oid, o in arg_oids:
             s.gc.send_proto(o)
             log.append(f"  GC: sending {o.c} obj {oid} ('{str(o.v)[:25]}')")
@@ -427,6 +439,18 @@ class AI:
                 for vn in to_remove:
                     del s.vars[vn]
                     log.append(f"     Var '{vn}' revoked (iso)")
+
+        # 撤销后检查：如果仍有其它变量指向该 iso，才是真正的别名违规
+        for oid, o in arg_oids:
+            if o.c == "iso":
+                for vn, vid in s.vars.items():
+                    if vid == oid:
+                        s._err(
+                            f"iso alias after revocation: '{vn}' still holds obj {oid}",
+                            st.line,
+                        )
+
+        # 构造目标消息
         tb = ta.d.bs.get(st.bn)
         named = []
         for i, (oid, o) in enumerate(arg_oids):
@@ -459,24 +483,24 @@ class AI:
                 if op == "ADD":
                     res = lv + rv
                 elif op == "EQEQ":
-                    res = lv == rv
+                    res = int(lv == rv)
                 elif op == "NEQ":
-                    res = lv != rv
+                    res = int(lv != rv)
                 else:
                     s._err(f"unsupported string operator {op}", expr.line)
-            elif isinstance(lv, int) and isinstance(rv, int):
+            elif (isinstance(lv, int) or isinstance(lv, bool)) and (isinstance(rv, int) or isinstance(rv, bool)):
                 if op == "ADD": res = lv + rv
                 elif op == "SUB": res = lv - rv
                 elif op == "MUL": res = lv * rv
                 elif op == "DIV":
                     if rv == 0: s._err("division by zero", expr.line)
                     res = lv // rv
-                elif op == "EQEQ": res = lv == rv
-                elif op == "NEQ": res = lv != rv
-                elif op == "LT": res = lv < rv
-                elif op == "GT": res = lv > rv
-                elif op == "LE": res = lv <= rv
-                elif op == "GE": res = lv >= rv
+                elif op == "EQEQ": res = int(lv == rv)
+                elif op == "NEQ":  res = int(lv != rv)
+                elif op == "LT":   res = int(lv < rv)
+                elif op == "GT":   res = int(lv > rv)
+                elif op == "LE":   res = int(lv <= rv)
+                elif op == "GE":   res = int(lv >= rv)
                 else: s._err(f"unsupported operator {op}", expr.line)
             else:
                 s._err(f"type mismatch in {op}: {type(lv).__name__} ({lv}) vs {type(rv).__name__} ({rv})", expr.line)
@@ -509,15 +533,25 @@ class DR:
                     del s.ghm[oid]
 
     def inst(s, an, quiet=0):
-        d = s.ad[an]; ai = AI(d, s.nid, s); s.actors[s.nid] = ai; aid = s.nid; s.nid += 1
+        if an not in s.ad:
+            raise RuntimeError(f"actor type '{an}' is not defined")
+        d = s.ad[an]
+        ai = AI(d, s.nid, s)
+        s.actors[s.nid] = ai
+        aid = s.nid
+        s.nid += 1
         s._aid_order.append(aid)
-        if not quiet: s.log.append(f"Instantiated Actor: {an} (id={aid})")
-        else: s.log.append(f"  (new) Actor: {an} (id={aid})")
+        if not quiet:
+            s.log.append(f"Instantiated Actor: {an} (id={aid})")
+        else:
+            s.log.append(f"  (new) Actor: {an} (id={aid})")
         for vn, c, val in d.sv:
             oid = ai._eval(val)
             o = s.ghm.get(oid)
-            if o is None: raise RuntimeError(f"State init object {oid} missing")
-            o.c = c; ai.vars[vn] = oid
+            if o is None:
+                raise RuntimeError(f"State init object {oid} missing")
+            o.c = c
+            ai.vars[vn] = oid
         return aid
 
     def run(s, mx=500):
@@ -529,17 +563,21 @@ class DR:
             anyexec = 0
             for aid in s._aid_order:
                 try:
-                    if s.actors[aid].proc(s.log): anyexec = 1
+                    if s.actors[aid].proc(s.log):
+                        anyexec = 1
                 except RuntimeError as e:
                     s.log.append(f"\n  RUNTIME ERROR: {e}")
                     raise
             st += 1
             if not anyexec:
-                s.log.append(f"\nAll messages processed. Halted at step {st}."); break
-        else: s.log.append("\nMax steps reached, halting.")
+                s.log.append(f"\nAll messages processed. Halted at step {st}.")
+                break
+        else:
+            s.log.append("\nMax steps reached, halting.")
 
     def pl(s):
-        for l in s.log: print(l)
+        for l in s.log:
+            print(l)
 
 def run(code, mx=500):
     toks = lx(code)
@@ -547,15 +585,24 @@ def run(code, mx=500):
     rt = DR(ast, code)
     en = None
     for n in ("App", "Main"):
-        if n in ast: en = n; break
+        if n in ast:
+            en = n
+            break
     if en is None:
-        for nm in ast: rt.inst(nm)
+        for nm in ast:
+            rt.inst(nm)
         for aid, a in rt.actors.items():
-            if a.d.bs: fb = list(a.d.bs.keys())[0]; a.mb.append((fb, []))
+            if a.d.bs:
+                fb = list(a.d.bs.keys())[0]
+                a.mb.append((fb, []))
     else:
-        eid = rt.inst(en); ea = rt.actors[eid]
-        if ea.d.bs: fb = list(ea.d.bs.keys())[0]; ea.mb.append((fb, []))
-    rt.run(mx); rt.pl()
+        eid = rt.inst(en)
+        ea = rt.actors[eid]
+        if ea.d.bs:
+            fb = list(ea.d.bs.keys())[0]
+            ea.mb.append((fb, []))
+    rt.run(mx)
+    rt.pl()
     return rt
 
 if __name__ == "__main__":
