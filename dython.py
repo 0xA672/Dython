@@ -1,5 +1,6 @@
 import re
 from collections import deque
+import sys
 
 class Tk:
     def __init__(s, t, v, l=0): s.t, s.v, s.l = t, v, l
@@ -429,3 +430,11 @@ def run(code, mx=80):
         if ea.d.bs: fb = list(ea.d.bs.keys())[0]; ea.mb.append((fb, []))
     rt.run(mx); rt.pl()
     return rt
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python dython.py <file.dy>")
+        sys.exit(1)
+    with open(sys.argv[1], 'r') as f:
+        code = f.read()
+    run(code)
