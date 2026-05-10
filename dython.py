@@ -8,7 +8,7 @@ class Tk:
 
 _LEX_TS = [
     ("C",   r"#[^\n]*"),
-    ("K",   r"\b(actor|behav|var|new|iso|val|ref|print)\b"),
+    ("K",   r"\b(actor|behav|var|new|iso|val|ref|print|if|else|while)\b"),
     ("EQEQ", r"=="), ("NEQ", r"!="), ("LE", r"<="), ("GE", r">="),
     ("BNG", r"!"), ("EQ", r"="), ("LT", r"<"), ("GT", r">"),
     ("ADD", r"\+"), ("SUB", r"-"), ("MUL", r"\*"), ("DIV", r"/"),
@@ -16,6 +16,8 @@ _LEX_TS = [
     ("LP",  r"\("), ("RP", r"\)"), ("CMA", r","), ("CLN", r":"),
     ("STR", r'"[^"]*"'),
     ("N",   r"\d+"),
+    ("LBRACE", r"\{"),
+    ("RBRACE", r"\}"),
     ("NL",  r"\n"),
     ("WS",  r"[ \t]+"),
 ]
@@ -48,6 +50,12 @@ class Send:
 
 class Prt:
     def __init__(s, e, line=0): s.e, s.line = e, line
+
+class If:
+    def __init__(s, cond, body, else_body, line=0): s.cond, s.body, s.else_body, s.line = cond, body, else_body, line
+
+class While:
+    def __init__(s, cond, body, line=0): s.cond, s.body, s.line = cond, body, line
 
 class Lit:
     def __init__(s, v, typ, line=0): s.v, s.typ, s.line = v, typ, line
@@ -119,6 +127,8 @@ class Prs:
             if s.mt("K", "var"): bd.append(s._stmt_var())
             elif s.mt("K", "new"): bd.append(s._stmt_new())
             elif s.mt("K", "print"): bd.append(s._stmt_print())
+            elif s.mt("K", "if"): bd.append(s._stmt_if())
+            elif s.mt("K", "while"): bd.append(s._stmt_while())
             elif s.mt("I"): bd.append(s._stmt_send())
             else: break
         return BD(n, ps, bd)
@@ -170,6 +180,38 @@ class Prs:
             if s.mt("CMA"): s.eat("CMA")
         s.eat("RP")
         return Send(t, bn, args, line)
+
+    def _stmt_if(s):
+        line = s.cur().l
+        s.eat("K", "if")
+        cond = s.expr()
+        body = s._block()
+        else_body = []
+        if s.mt("K", "else"):
+            s.eat("K", "else")
+            else_body = s._block()
+        return If(cond, body, else_body, line)
+
+    def _stmt_while(s):
+        line = s.cur().l
+        s.eat("K", "while")
+        cond = s.expr()
+        body = s._block()
+        return While(cond, body, line)
+
+    def _block(s):
+        s.eat("LBRACE")
+        stmts = []
+        while not s.mt("RBRACE") and not s.mt("EOF"):
+            if s.mt("K", "var"): stmts.append(s._stmt_var())
+            elif s.mt("K", "new"): stmts.append(s._stmt_new())
+            elif s.mt("K", "print"): stmts.append(s._stmt_print())
+            elif s.mt("K", "if"): stmts.append(s._stmt_if())
+            elif s.mt("K", "while"): stmts.append(s._stmt_while())
+            elif s.mt("I"): stmts.append(s._stmt_send())
+            else: break
+        s.eat("RBRACE")
+        return stmts
 
     def expr(s): return s._comp()
 
@@ -288,6 +330,14 @@ class AI:
             hint = "\n  " + sl + "\n  " + " " * indent + "^"
         raise RuntimeError(f"L{line} Actor[{s.id}] '{s.d.n}': {msg}{hint}")
 
+    def _truthy(s, oid):
+        o = s.rt.ghm.get(oid)
+        if o is None: return False
+        val = o.v
+        if isinstance(val, int): return val != 0
+        if isinstance(val, str): return val != ""
+        return True
+
     def _exec(s, st, log):
         if isinstance(st, Asgn):
             oid = s._eval(st.val)
@@ -308,7 +358,19 @@ class AI:
             o = s.rt.ghm.get(oid)
             if o: log.append(f"  PRINT: {o.v}")
             else: log.append("  PRINT: Object GC'd")
-        elif isinstance(st, Send): s._send(st, log)
+        elif isinstance(st, Send):
+            s._send(st, log)
+        elif isinstance(st, If):
+            oid = s._eval(st.cond)
+            if s._truthy(oid):
+                for sub in st.body: s._exec(sub, log)
+            else:
+                for sub in st.else_body: s._exec(sub, log)
+        elif isinstance(st, While):
+            while True:
+                oid = s._eval(st.cond)
+                if not s._truthy(oid): break
+                for sub in st.body: s._exec(sub, log)
 
     def _send(s, st, log):
         toid = s.vars.get(st.t)
@@ -393,7 +455,7 @@ class DR:
             o = s.ghm[oid]; o.c = c; ai.vars[vn] = oid; ai._obj_to_var[oid] = vn
         return aid
 
-    def run(s, mx=80):
+    def run(s, mx=500):
         s.log.append("\n" + "="*55)
         s.log.append("  Dython Orca GC Runtime -- Start")
         s.log.append("="*55)
@@ -414,7 +476,7 @@ class DR:
     def pl(s):
         for l in s.log: print(l)
 
-def run(code, mx=80):
+def run(code, mx=500):
     toks = lx(code)
     ast = Prs(toks, code).parse()
     rt = DR(ast, code)
