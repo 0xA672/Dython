@@ -76,9 +76,9 @@ class Prs:
 
     def mt(s, t=None, v=None):
         c = s.cur()
-        if t and c.t != t: return 0
-        if v and c.v != v: return 0
-        return 1
+        if t and c.t != t: return False
+        if v and c.v != v: return False
+        return True
 
     def eat(s, t=None, v=None):
         c = s.cur()
@@ -326,7 +326,6 @@ class AI:
         for st in bh.b:
             s._exec(st, log)
 
-        # 先裁剪局部变量，保证 GC 根集准确
         s.vars = {k: v for k, v in s.vars.items() if k in state_vars}
         log.append(f"  Orca GC sweep for Actor[{s.id}] ({s.d.n})...")
         roots = list(s.vars.values())
@@ -425,12 +424,10 @@ class AI:
             if o is None: s._err(f"argument object {oid} no longer exists", st.line)
             arg_oids.append((oid, o))
 
-        # 验证：ref 禁止发送
         for oid, o in arg_oids:
             if o.c == "ref":
                 s._err(f"cannot send ref object {oid} '{o.v}'", st.line)
 
-        # 先执行发送协议，对 iso 撤销发送方的持有权
         for oid, o in arg_oids:
             s.gc.send_proto(o)
             log.append(f"  GC: sending {o.c} obj {oid} ('{str(o.v)[:25]}')")
@@ -440,7 +437,6 @@ class AI:
                     del s.vars[vn]
                     log.append(f"     Var '{vn}' revoked (iso)")
 
-        # 撤销后检查：如果仍有其它变量指向该 iso，才是真正的别名违规
         for oid, o in arg_oids:
             if o.c == "iso":
                 for vn, vid in s.vars.items():
@@ -450,7 +446,6 @@ class AI:
                             st.line,
                         )
 
-        # 构造目标消息
         tb = ta.d.bs.get(st.bn)
         named = []
         for i, (oid, o) in enumerate(arg_oids):
