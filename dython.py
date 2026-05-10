@@ -288,7 +288,7 @@ class GC:
         raise RuntimeError(f"unknown capability {o.c} in send")
 
     def recv_proto(s, o):
-        s.h[o.id] = o; s.rt._inc_ref(o.id)
+        s.h[o.id] = o; s.rt._inc_ref(o.id); s.rt.ghm[o.id] = o
 
     def ms(s, roots):
         reach = set(roots)
@@ -300,6 +300,8 @@ class GC:
         return swept
 
 class AI:
+    MAX_WHILE_ITERS = 10000
+
     def __init__(s, d, aid, rt):
         s.d, s.id, s.rt, s.vars, s.gc, s.mb = d, aid, rt, {}, GC(d.n, aid, rt), deque()
 
@@ -379,10 +381,14 @@ class AI:
             else:
                 for sub in st.else_body: s._exec(sub, log)
         elif isinstance(st, While):
+            iters = 0
             while True:
+                if iters >= AI.MAX_WHILE_ITERS:
+                    s._err(f"while loop exceeded max iterations ({AI.MAX_WHILE_ITERS})", st.line)
                 oid = s._eval(st.cond)
                 if not s._truthy(oid): break
                 for sub in st.body: s._exec(sub, log)
+                iters += 1
 
     def _check_iso_alias(s, oid, new_vn, line):
         for vn, vid in s.vars.items():
@@ -449,13 +455,22 @@ class AI:
             if lo is None or ro is None:
                 s._err(f"operand no longer exists", expr.line)
             lv, rv = lo.v, ro.v; op = expr.op
-            if isinstance(lv, str) and isinstance(rv, str) and op == "ADD":
-                res = lv + rv
+            if isinstance(lv, str) and isinstance(rv, str):
+                if op == "ADD":
+                    res = lv + rv
+                elif op == "EQEQ":
+                    res = lv == rv
+                elif op == "NEQ":
+                    res = lv != rv
+                else:
+                    s._err(f"unsupported string operator {op}", expr.line)
             elif isinstance(lv, int) and isinstance(rv, int):
                 if op == "ADD": res = lv + rv
                 elif op == "SUB": res = lv - rv
                 elif op == "MUL": res = lv * rv
-                elif op == "DIV": res = lv // rv
+                elif op == "DIV":
+                    if rv == 0: s._err("division by zero", expr.line)
+                    res = lv // rv
                 elif op == "EQEQ": res = lv == rv
                 elif op == "NEQ": res = lv != rv
                 elif op == "LT": res = lv < rv
