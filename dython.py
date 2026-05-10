@@ -1,26 +1,28 @@
 import re
+from collections import deque
 
 class Tk:
     def __init__(s, t, v, l=0): s.t, s.v, s.l = t, v, l
     def __repr__(s): return f"Tk({s.t},{s.v!r})"
 
+_LEX_TS = [
+    ("C",   r"#[^\n]*"),
+    ("K",   r"\b(actor|behav|var|new|iso|val|ref|print)\b"),
+    ("EQEQ", r"=="), ("NEQ", r"!="), ("LE", r"<="), ("GE", r">="),
+    ("BNG", r"!"), ("EQ", r"="), ("LT", r"<"), ("GT", r">"),
+    ("ADD", r"\+"), ("SUB", r"-"), ("MUL", r"\*"), ("DIV", r"/"),
+    ("I",   r"[a-zA-Z_]\w*"),
+    ("LP",  r"\("), ("RP", r"\)"), ("CMA", r","), ("CLN", r":"),
+    ("STR", r'"[^"]*"'),
+    ("N",   r"\d+"),
+    ("NL",  r"\n"),
+    ("WS",  r"[ \t]+"),
+]
+_LEX_RE = re.compile("|".join(f"(?P<{a}>{b})" for a, b in _LEX_TS))
+
 def lx(c):
-    ts = [
-        ("C",   r"#[^\n]*"),
-        ("K",   r"\b(actor|behav|var|new|iso|val|ref|print)\b"),
-        ("EQEQ", r"=="), ("NEQ", r"!="), ("LE", r"<="), ("GE", r">="),
-        ("BNG", r"!"), ("EQ", r"="), ("LT", r"<"), ("GT", r">"),
-        ("ADD", r"\+"), ("SUB", r"-"), ("MUL", r"\*"), ("DIV", r"/"),
-        ("I",   r"[a-zA-Z_]\w*"),
-        ("LP",  r"\("), ("RP", r"\)"), ("CMA", r","), ("CLN", r":"),
-        ("STR", r'"[^"]*"'),
-        ("N",   r"\d+"),
-        ("NL",  r"\n"),
-        ("WS",  r"[ \t]+"),
-    ]
-    r_ = "|".join(f"(?P<{a}>{b})" for a, b in ts)
     toks, ln = [], 1
-    for m in re.finditer(r_, c):
+    for m in _LEX_RE.finditer(c):
         k, v = m.lastgroup, m.group()
         if k == "NL": ln += 1; continue
         if k in ("WS", "C"): continue
@@ -240,7 +242,7 @@ class GC:
 
     def recv_proto(s, o): s.h[o.id] = o
 
-    def ms(s, roots):
+    def ms(s, roots, ghm=None):
         s.ep += 1; reach = set()
         for rid in roots:
             if rid in s.h: reach.add(rid)
@@ -249,26 +251,28 @@ class GC:
         swept = []
         for oid in to_del:
             o = s.h[oid]; swept.append((oid, o.v, o.c)); del s.h[oid]
+            if ghm and oid in ghm: del ghm[oid]
         return swept
 
 class AI:
     def __init__(s, d, aid, rt):
-        s.d, s.id, s.rt, s.vars, s.gc, s.mb = d, aid, rt, {}, GC(d.n, aid), []
+        s.d, s.id, s.rt, s.vars, s.gc, s.mb = d, aid, rt, {}, GC(d.n, aid), deque()
+        s._obj_to_var = {}
 
     def proc(s, log):
         if not s.mb: return 0
-        bn, binds = s.mb.pop(0)
+        bn, binds = s.mb.popleft()
         log.append(f"\n{'─'*55}")
         log.append(f"Actor[{s.id}] ({s.d.n}) > {bn}")
         bh = s.d.bs[bn]
         for pn, o in binds:
-            s.gc.recv_proto(o); s.vars[pn] = o.id
+            s.gc.recv_proto(o); s.vars[pn] = o.id; s._obj_to_var[o.id] = pn
             log.append(f"  Param '{pn}' ({o.c}) = \"{o.v}\" [obj {o.id}]")
         for st in bh.b:
             s._exec(st, log)
         log.append(f"  Orca GC sweep for Actor[{s.id}] ({s.d.n})...")
         roots = list(s.vars.values())
-        swept = s.gc.ms(roots)
+        swept = s.gc.ms(roots, s.rt.ghm)
         for oid, v, c in swept:
             log.append(f"     Swept {c} obj {oid}: '{v}'")
         log.append(f"  Heap: {len(s.gc.h)} objs | Outgoing refs: {len(s.gc.out)}")
@@ -286,12 +290,17 @@ class AI:
     def _exec(s, st, log):
         if isinstance(st, Asgn):
             oid = s._eval(st.val)
-            o = s.rt.ghm[oid]; o.c = st.c; s.vars[st.vn] = oid
+            o = s.rt.ghm[oid]; o.c = st.c
+            old_oid = s.vars.get(st.vn)
+            if old_oid is not None: s._obj_to_var.pop(old_oid, None)
+            s.vars[st.vn] = oid; s._obj_to_var[oid] = st.vn
             log.append(f"  var {st.vn}: {o.c} = \"{o.v}\" [obj {oid}]")
         elif isinstance(st, NewA):
             nid = s.rt.inst(st.at, quiet=1)
             r = s.gc.alloc_ar(nid, st.at)
-            s.vars[st.vn] = r.id; s.rt.ghm[r.id] = r; s.rt.arm[r.id] = nid
+            old_oid = s.vars.get(st.vn)
+            if old_oid is not None: s._obj_to_var.pop(old_oid, None)
+            s.vars[st.vn] = r.id; s.rt.ghm[r.id] = r; s.rt.arm[r.id] = nid; s._obj_to_var[r.id] = st.vn
             log.append(f"  new {st.vn} = {st.at} (actor_id={nid}, ref_id={r.id})")
         elif isinstance(st, Prt):
             oid = s._eval(st.e)
@@ -319,8 +328,10 @@ class AI:
                 s.gc.send_proto(o)
                 log.append(f"  GC: sending {o.c} obj {o.id} ('{str(o.v)[:25]}')")
                 if not isinstance(o, AR) and o.c == "iso":
-                    for vn, vid in list(s.vars.items()):
-                        if vid == o.id: del s.vars[vn]; log.append(f"     Var '{vn}' revoked (iso)")
+                    vn = s._obj_to_var.pop(o.id, None)
+                    if vn is not None:
+                        del s.vars[vn]
+                        log.append(f"     Var '{vn}' revoked (iso)")
             except RuntimeError as e:
                 s._err(str(e), st.line)
         tb = ta.d.bs.get(st.bn)
@@ -369,24 +380,26 @@ class DR:
     def __init__(s, ads, src=None):
         s.ad, s.actors, s.ghm, s.arm, s.nid, s.log = ads, {}, {}, {}, 1, []
         s.src = src.split("\n") if src else []
+        s._aid_order = []
 
     def inst(s, an, quiet=0):
         d = s.ad[an]; ai = AI(d, s.nid, s); s.actors[s.nid] = ai; aid = s.nid; s.nid += 1
+        s._aid_order.append(aid)
         if not quiet: s.log.append(f"Instantiated Actor: {an} (id={aid})")
         else: s.log.append(f"  (new) Actor: {an} (id={aid})")
         for vn, c, val in d.sv:
             oid = ai._eval(val)
-            o = s.ghm[oid]; o.c = c; ai.vars[vn] = oid
+            o = s.ghm[oid]; o.c = c; ai.vars[vn] = oid; ai._obj_to_var[oid] = vn
         return aid
 
-    def run(s, mx=50):
+    def run(s, mx=80):
         s.log.append("\n" + "="*55)
         s.log.append("  Dython Orca GC Runtime -- Start")
         s.log.append("="*55)
         st = 0
         while st < mx:
             anyexec = 0
-            for aid in sorted(s.actors.keys()):
+            for aid in s._aid_order:
                 try:
                     if s.actors[aid].proc(s.log): anyexec = 1
                 except RuntimeError as e:
@@ -400,7 +413,7 @@ class DR:
     def pl(s):
         for l in s.log: print(l)
 
-def run(code, mx=50):
+def run(code, mx=80):
     toks = lx(code)
     ast = Prs(toks, code).parse()
     rt = DR(ast, code)
