@@ -146,14 +146,8 @@ class Prs:
                 ps.append((pn, pc))
                 if s.mt("CMA"): s.eat("CMA")
             s.eat("RP")
-        elif s.mt("I"):
-            pn = s.eat("I").v; pc = "ref"
-            if s.mt("CLN"): s.eat("CLN"); pc = s.eat("K").v
-            ps.append((pn, pc))
-            while s.mt("CMA"):
-                s.eat("CMA"); pn = s.eat("I").v; pc = "ref"
-                if s.mt("CLN"): s.eat("CLN"); pc = s.eat("K").v
-                ps.append((pn, pc))
+        else:
+            s._err("expected '(' after behavior name")
         return ps
 
     def _stmt_var(s):
@@ -311,6 +305,7 @@ class AI:
         log.append(f"\n{'─'*55}")
         log.append(f"Actor[{s.id}] ({s.d.n}) > {bn}")
         bh = s.d.bs[bn]
+        state_vars = {sv[0] for sv in s.d.sv}
         for i, (pn, o) in enumerate(binds):
             if bh and i < len(bh.ps):
                 param_cap = bh.ps[i][1]
@@ -325,6 +320,7 @@ class AI:
         swept = s.gc.ms(roots)
         for oid, v, c in swept:
             log.append(f"     Swept {c} obj {oid}: '{v}'")
+        s.vars = {k: v for k, v in s.vars.items() if k in state_vars}
         log.append(f"  Heap: {len(s.gc.h)} objs")
         return 1
 
@@ -418,7 +414,7 @@ class AI:
             if o.c == "ref":
                 s._err(f"cannot send ref object {oid} '{o.v}'", st.line)
             if o.c == "iso":
-                s._check_iso_alias(oid, None, st.line)
+                s._check_iso_alias(oid, "<send>", st.line)
         for oid, o in arg_oids:
             s.gc.send_proto(o)
             log.append(f"  GC: sending {o.c} obj {oid} ('{str(o.v)[:25]}')")
