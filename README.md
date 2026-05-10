@@ -155,10 +155,11 @@ You’ll see detailed logs of message sends, GC sweeps, and actor state. All tes
 - **Memory leak fixed**: GC now synchronises `rt.ghm` during sweeps.
 - **Performance**: replaced `list` with `deque` for message queues; precompiled the lexer regex; removed per-step actor sorting; `iso` revocation is now O(1).
 - **Error reporting**: syntax and runtime errors include the offending source line, a caret pointing to the error position, and the actor identifier.
+- **Control flow**: added `if`/`else` and `while` with block syntax `{}`.
 
 ## Limitations
 
-- No control flow (no `if`, `while`, loops).
+- Limited control flow: `if`/`else` and `while` loops work, but no `for`, pattern matching, or loop‑control statements (`break`, `continue`).
 - Only integer and string types; no user‑defined classes or arrays.
 - Expression evaluation always creates new `val` objects on the fly for intermediate results (no in‑place mutation).
 - Actors are single‑threaded and run cooperatively (one behaviour at a time, in a fixed order).
